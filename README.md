@@ -1,19 +1,22 @@
 # agora-mem
 
-**Workflow-native session memory for AI agents and team handoffs.**
+**Persistent session memory for AI apps and team handoffs.**
 
-Store what happened. Resume where you left off. Works with any Python async app — or natively with Agora workflows.
+Store what happened. Resume where you left off. Works with any Python async app.
 
 ---
 
 ## Install
 
 ```bash
-pip install agora-mem                    # core (SQLite only, no extras)
+pip install agora-mem                    # core (SQLite, no API keys needed)
 pip install "agora-mem[openai]"          # + OpenAI embeddings for semantic search
 pip install "agora-mem[mcp]"             # + MCP server for Claude/Cursor
-pip install "agora-mem[agora]"           # + Agora TracedMemoryNode integration
-pip install "agora-mem[all]"             # everything
+```
+
+Or directly from GitHub:
+```bash
+pip install git+https://github.com/thebnbrkr/agora-mem.git
 ```
 
 ---
@@ -21,26 +24,27 @@ pip install "agora-mem[all]"             # everything
 ## Quick Start
 
 ```python
-from agora_mem import MemoryStore, MemoryNode
-
-memory = MemoryStore()  # SQLite, stored in ~/.agora_mem/memory.db
-
-class MyNode(MemoryNode):
-    async def exec_async(self, shared):
-        # Previous session loaded automatically into shared
-        last_decision = shared.get("last_decision", "None")
-        print(f"Last session decided: {last_decision}")
-
-        # Return new state — auto-saved after exec
-        return {
-            "last_decision": "Use Redis for caching",
-            "next_steps": ["Benchmark Redis vs in-memory"],
-        }
-
+from agora_mem import MemoryStore
 import asyncio
 
-node = MyNode(memory=memory, session_key="session_id")
-asyncio.run(node.run_async({"session_id": "my-project"}))
+memory = MemoryStore()  # SQLite, zero config
+
+async def main():
+    # Store a session
+    await memory.store("user_alice", {
+        "topic": "SaaS pricing strategy",
+        "decisions": ["go with usage-based pricing"],
+        "next_steps": ["research competitor tiers"]
+    })
+
+    # Load it back (next day, new session)
+    session = await memory.load("user_alice")
+    print(session.state["decisions"])  # ["go with usage-based pricing"]
+
+    # Full-text search across all sessions (FTS5, no API calls)
+    results = await memory.search("pricing strategy")
+
+asyncio.run(main())
 ```
 
 ---
@@ -49,83 +53,90 @@ asyncio.run(node.run_async({"session_id": "my-project"}))
 
 | Use Case | What Gets Stored |
 |---|---|
-| **Coding agent** | Current file, hypothesis, decisions, branch |
-| **Support tickets** | Issue, resolution attempts, escalation chain |
-| **Sales handoffs** | Prospect, pain points, last call summary |
-| **Chat app** | User preferences, past conversation summary |
+| **Chat app** | User preferences, conversation summary, past topics |
+| **Support tickets** | Issue, resolution attempts, escalation history |
+| **Sales handoffs** | Prospect info, pain points, last call summary |
 | **Medical** | Patient summary, current meds, next actions |
+| **Team standups** | Blockers, decisions made, who owns what |
+
+---
+
+## Search
+
+```python
+# Free full-text search (FTS5, BM25 ranked — no API calls)
+results = await memory.search("slow API timeout")
+
+# Semantic vector search (requires embeddings configured)
+memory = MemoryStore(embeddings="openai")
+await memory.embed("session_1")               # index this session
+results = await memory.semantic_search("performance issues")
+```
+
+---
+
+## Embeddings
+
+```python
+MemoryStore(embeddings="openai")   # text-embedding-3-small
+MemoryStore(embeddings="gemini")   # text-embedding-004
+MemoryStore(embeddings="local")    # all-MiniLM-L6-v2 (no API key, on-device)
+MemoryStore(embeddings=None)       # keyword search only (default)
+```
+
+Embeddings are **never generated automatically** — call `embed(session_id)` explicitly
+to control costs. Use `search()` for free FTS5 search without any embeddings.
+
+---
+
+## Extractor
+
+Turn any raw session state into structured output:
+
+```python
+from agora_mem.extractor import extract, openai_llm
+
+structured = await extract(session.state, llm_fn=openai_llm())
+# {
+#   "summary":      "Team decided on usage-based pricing after competitor research",
+#   "key_items":    ["usage-based pricing", "free tier at 1000 calls/mo"],
+#   "next_actions": ["A/B test landing page", "email beta users"],
+#   "tags":         ["pricing", "saas", "beta"]
+# }
+```
 
 ---
 
 ## MCP Server (Claude / Cursor)
 
-Add to your `claude_desktop_config.json`:
+Add to `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "agora-mem": {
-      "command": "agora-mem-mcp",
-      "env": {
-        "AGORA_MEM_STORAGE": "sqlite"
-      }
+      "command": "agora-mem-mcp"
     }
   }
 }
 ```
 
-Then Claude can call:
-- `mem_store` — save a session
-- `mem_load` — load by ID
-- `mem_search` — semantic search across sessions
-- `mem_list` — list all sessions
+Claude can then call `mem_store`, `mem_load`, `mem_search`, `mem_list`.
 
 ---
 
-## With Agora (traced memory)
-
-```python
-from agora_mem.integrations.agora import TracedMemoryNode
-
-class MyNode(TracedMemoryNode):
-    async def exec_async(self, shared):
-        # Full Agora telemetry on every memory read/write
-        return {"status": "done"}
-```
-
----
-
-## Storage Backends
-
-| Backend | When to use |
-|---|---|
-| `sqlite` (default) | Local dev, single machine |
-| `supabase` | Cloud / team shared memory |
-
-```python
-# Local
-memory = MemoryStore(storage="sqlite")
-
-# Cloud
-memory = MemoryStore(
-    storage="supabase",
-    supabase_url="...",
-    supabase_key="...",
-    embeddings="openai",
-)
-```
-
----
-
-## How It Differs From Mem0
+## vs Mem0
 
 | | Mem0 | agora-mem |
-|---|---|---|
-| Storage | Text blobs | Structured dicts + update-in-place |
-| Compression | None | Write-time, per-field |
-| Workflows | Manual | Native via `MemoryNode` lifecycle |
-| MCP | No | Yes — `agora-mem-mcp` |
-| TTL | Manual | Per-session TTL |
+|---|---|---| 
+| Unit | Individual facts | Full session state |
+| Retrieval | "Find facts about X" | "Load last session for project X" |
+| Search | Semantic only | FTS5 (free) + semantic (optional) |
+| Compression | None | Write-time via LLM |
+| TTL | Manual | Per-session |
+
+Mem0 answers "what do I know about this user?"
+agora-mem answers "where did we leave off?"
 
 ---
 
